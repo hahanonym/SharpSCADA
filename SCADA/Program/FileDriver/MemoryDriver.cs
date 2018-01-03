@@ -100,17 +100,13 @@ namespace FileDriver
         int _count = 0;
         MemoryMappedFile mapp = null;
         MemoryMappedViewAccessor accessor = null;
-        SortedList<short, int> psList;
+        SortedList<short, int> psList = new SortedList<short, int>();
 
-        public MemoryReader(IDataServer parent, short id, string name, string server, int timeOut, string fileName = null, string spare2 = null)
+        public MemoryReader(IDataServer parent, short id, string name)
         {
             _parent = parent;
             _id = id;
             _name = name;
-            _fileName = fileName;
-            _server = server;
-            _timeOut = timeOut;
-            psList = new SortedList<short, int>();
         }
 
         public bool Connect()
@@ -263,6 +259,24 @@ namespace FileDriver
             catch { return new ItemData<int>(0, 0, QUALITIES.QUALITY_BAD); }
         }
 
+        public ItemData<uint> ReadUInt32(DeviceAddress address)
+        {
+            try
+            {
+                return new ItemData<uint>(accessor.ReadUInt32(FindPosition(address)), 0, QUALITIES.QUALITY_GOOD);
+            }
+            catch { return new ItemData<uint>(0, 0, QUALITIES.QUALITY_BAD); }
+        }
+
+        public ItemData<ushort> ReadUInt16(DeviceAddress address)
+        {
+            try
+            {
+                return new ItemData<ushort>(accessor.ReadUInt16(FindPosition(address)), 0, QUALITIES.QUALITY_GOOD);
+            }
+            catch { return new ItemData<ushort>(0, 0, QUALITIES.QUALITY_BAD); }
+        }
+
         public ItemData<short> ReadInt16(DeviceAddress address)
         {
             try
@@ -355,6 +369,26 @@ namespace FileDriver
             catch { return -1; }
         }
 
+        public int WriteUInt16(DeviceAddress address, ushort value)
+        {
+            try
+            {
+                accessor.Write(FindPosition(address), value);
+                return 0;
+            }
+            catch { return -1; }
+        }
+
+        public int WriteUInt32(DeviceAddress address, uint value)
+        {
+            try
+            {
+                accessor.Write(FindPosition(address), value);
+                return 0;
+            }
+            catch { return -1; }
+        }
+
         public int WriteInt32(DeviceAddress address, int value)
         {
             try
@@ -420,10 +454,14 @@ namespace FileDriver
                         hdata[i].Value.Byte = accessor.ReadByte(pos);
                         break;
                     case DataType.WORD:
+                        hdata[i].Value.Word = accessor.ReadUInt16(pos);
+                        break;
                     case DataType.SHORT:
                         hdata[i].Value.Int16 = accessor.ReadInt16(pos);
                         break;
-                    case DataType.TIME:
+                    case DataType.DWORD:
+                        hdata[i].Value.DWord = accessor.ReadUInt32(pos);
+                        break;
                     case DataType.INT:
                         hdata[i].Value.Int32 = accessor.ReadInt32(pos);
                         break;
