@@ -8,6 +8,9 @@ using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Text;
 using DataService;
+using Dapper;
+using DatabaseLib.Model;
+using System.Linq;
 
 namespace DatabaseLib
 {
@@ -62,22 +65,11 @@ namespace DatabaseLib
 
         public static bool GetRangeFromDatabase(short? ID, ref DateTime start, ref DateTime end)
         {
-            using (var reader = DataHelper.Instance.ExecuteReader("SELECT MIN(TIMESTAMP),MAX(TIMESTAMP) FROM LOG_HDATA" + (ID.HasValue ? " WHERE ID=" + ID.Value : "")))
-            {
-                if (reader != null)
-                {
-                    while (reader.Read())
-                    {
-                        if (!reader.IsDBNull(0))
-                            start = reader.GetDateTime(0);
-                        if (!reader.IsDBNull(1))
-                            end = reader.GetDateTime(1);
-                        return true;
-                    }
-                }
-            }
-            //start = end = DateTime.MinValue;
-            return false;
+            string sql = "SELECT * FROM LOG_HDATA" + (ID.HasValue ? " WHERE ID=" + ID.Value : "");
+            var result = DataHelper.InstanceConnection.Query<Log_HData>(sql);
+            start = result.Min(p => p.TimeStamp);
+            end= result.Max(p => p.TimeStamp);
+            return true;
         }
 
         public static void BackUpFile(DateTime date)
@@ -86,7 +78,8 @@ namespace DatabaseLib
             {
                 if (WriteToFile(date.AddDays(-1)) == 0)
                 {
-                    DataHelper.Instance.ExecuteNonQuery(string.Format("DELETE FROM LOG_HDATA WHERE [TIMESTAMP]<='{0}';", date.ToShortDateString()));
+                    string sql = string.Format("DELETE FROM LOG_HDATA WHERE [TIMESTAMP]<='{0}';", date.ToShortDateString());
+                    int r=DataHelper.InstanceConnection.Execute(sql);
                 }
             }
         }

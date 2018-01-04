@@ -38,7 +38,8 @@ namespace BatchCoreService
             // Open the ServiceHostBase to create listeners and start 
             // listening for messages.
             serviceHost.Open();
-            //Console.ReadLine();
+            Console.WriteLine("Done");
+            Console.ReadLine();
         }
 
         public void Dispose()

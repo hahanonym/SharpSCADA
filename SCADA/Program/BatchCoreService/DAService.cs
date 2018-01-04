@@ -17,6 +17,8 @@ using System.Text;
 using System.Threading;
 using System.Timers;
 using System.Xml;
+using Dapper;
+using DatabaseLib.Model;
 
 namespace BatchCoreService
 {
@@ -160,17 +162,7 @@ namespace BatchCoreService
                         if (list != null && list.Count() > 0)
                         {
                             string sql = "SELECT TAGID,DESCRIPTION FROM META_TAG WHERE TAGID IN(" + string.Join(",", list) + ");";
-                            using (var reader = DataHelper.Instance.ExecuteReader(sql))
-                            {
-                                if (reader != null)
-                                {
-                                    _archiveList = new Dictionary<short, string>();
-                                    while (reader.Read())
-                                    {
-                                        _archiveList.Add(reader.GetInt16(0), reader.GetNullableString(1));
-                                    }
-                                }
-                            }
+                            _archiveList = DataHelper.InstanceConnection.Query<Meta_Tag>(sql).ToDictionary(p => (short)p.TagID, p => p.Description);
                         }
                     }
                 }
@@ -389,150 +381,149 @@ namespace BatchCoreService
 
         void InitServerByDatabase()
         {
-            using (var dataReader = DataHelper.Instance.ExecuteProcedureReader("InitServer", DataHelper.CreateParam("@TYPE", SqlDbType.Int, 0)))
+            try
             {
-                if (dataReader == null) return;// Stopwatch sw = Stopwatch.StartNew();
-                while (dataReader.Read())
+                var sql1 = @"SELECT M.DRIVERID,M.DRIVERNAME,M.SERVER,M.TIMEOUT,M.Spare1,M.Spare2,R.AssemblyName,R.ClassFullName 
+                         FROM Meta_Driver M 
+                         INNER JOIN RegisterModule R 
+                         ON M.DRIVERTYPE=R.DriverID;";
+                var result1 = DataHelper.InstanceConnection.Query<Meta_Driver, RegisterModule, dynamic>(sql1, ((p2, p1) =>
                 {
-                    _arguments.Add(new DriverArgumet(dataReader.GetInt16(0), dataReader.GetNullableString(1), dataReader.GetNullableString(2)));
-                }
-                dataReader.NextResult();
-                while (dataReader.Read())
+                    return new { p2.DriverID, p2.DriverName, p2.Server, p2.TimeOut, p1.AssemblyName, p1.ClassFullName, p2.Spare1, p2.Spare2 };
+                }), splitOn: "AssemblyName").ToList();
+                result1.ForEach(p =>
                 {
-                    AddDriver(dataReader.GetInt16(0), dataReader.GetNullableString(1), dataReader.GetNullableString(2),  dataReader.GetNullableString(3));
-                }
+                    AddDriver((short)p.DriverID, p.DriverName,  p.AssemblyName, p.ClassFullName);
+                });
 
-                dataReader.NextResult();
-                dataReader.Read();
-                int count = dataReader.GetInt32(0);
-                _list = new List<TagMetaData>(count);
-                _mapping = new Dictionary<string, ITag>(count);
-                dataReader.NextResult();
-                while (dataReader.Read())
+                var sql2 = "SELECT * FROM Meta_Tag WHERE ISACTIVE=1;";
+                _list = DataHelper.InstanceConnection.Query<Meta_Tag>(sql2).Select(p =>
                 {
-                    var meta = new TagMetaData(dataReader.GetInt16(0), dataReader.GetInt16(1), dataReader.GetString(2), dataReader.GetString(3), (DataType)dataReader.GetByte(4),
-                     (ushort)dataReader.GetInt16(5), dataReader.GetBoolean(6), dataReader.GetFloat(7), dataReader.GetFloat(8), dataReader.GetInt32(9));
-                    _list.Add(meta);
-                    if (meta.Archive)
+                    if (p.Archive)
                     {
-                        _archiveTimes.Add(meta.ID, meta.Cycle == 0 ? null : new ArchiveTime(meta.Cycle, DateTime.MinValue));
+                        _archiveTimes.Add((short)p.TagID, p.Cycle == 0 ? null : new ArchiveTime(p.Cycle, DateTime.MinValue));
                     }
-                    //Advise(DDETOPIC, meta.Name);
-                }
+                    return new TagMetaData((short)p.TagID, (short)p.GroupID, p.TagName, p.Address,
+                         (DataType)p.DataType, (ushort)p.DataSize, p.Archive, (float)p.Maximum, (float)p.Minimum, p.Cycle);
+                }).ToList();
                 _list.Sort();
-                dataReader.NextResult();
-                while (dataReader.Read())
+                _mapping = new Dictionary<string, ITag>(_list.Count);
+
+                var sql3 = "SELECT * FROM Meta_Group;";
+                var result3 = DataHelper.InstanceConnection.Query<Meta_Group>(sql3).ToList();
+                result3.ForEach(p =>
                 {
                     IDriver dv;
-                    _drivers.TryGetValue(dataReader.GetInt16(0), out dv);
+                    _drivers.TryGetValue((short)p.DriverID, out dv);
                     if (dv != null)
                     {
-                        IGroup grp = dv.AddGroup(dataReader.GetString(1), dataReader.GetInt16(2), dataReader.GetInt32(3),
-                               dataReader.GetFloat(4), dataReader.GetBoolean(5));
+                        IGroup grp = dv.AddGroup(p.GroupName, (short)p.GroupID, p.UpdateRate, (float)p.DeadBand, p.IsActive);
                         if (grp != null)
                             grp.AddItems(_list);
                     }
-                }
-                dataReader.NextResult();
-                while (dataReader.Read())
+                });
+
+                var sql4 = "SELECT SOURCE FROM Meta_Condition WHERE EVENTTYPE=2;";
+                var result4 = DataHelper.InstanceConnection.Query<string>(sql4).ToList();
+                result4.ForEach(p =>
                 {
-                    ITag tag = this[dataReader.GetNullableString(0)];
+                    ITag tag = this[p];
                     if (tag != null)
                     {
                         tag.ValueChanged += OnValueChanged;
                     }
-                }
-                dataReader.NextResult();
-                _conditions = new List<ICondition>();
+                });
+
+                var sql5 = @"SELECT	* from  Meta_Condition WHERE EVENTTYPE <> 2;";
+
                 _conditionList = new List<ICondition>();
-                while (dataReader.Read())
-                {
-                    int id = dataReader.GetInt32(0);
-                    AlarmType type = (AlarmType)dataReader.GetInt32(2);
-                    ICondition cond;
-                    string source = dataReader.GetString(1);
-                    if (_conditions.Count > 0)
-                    {
-                        cond = _conditions[_conditions.Count - 1];
-                        if (cond.ID == id)
-                        {
-                            cond.AddSubCondition(new SubCondition((SubAlarmType)dataReader.GetInt32(9), dataReader.GetFloat(10),
-                                (Severity)dataReader.GetByte(11), dataReader.GetString(12), dataReader.GetBoolean(13)));
-                            continue;
-                        }
-                    }
-                    switch (type)
-                    {
-                        case AlarmType.Complex:
-                            cond = new ComplexCondition(id, source, dataReader.GetString(6), dataReader.GetFloat(7), dataReader.GetInt32(8));
-                            break;
-                        case AlarmType.Level:
-                            cond = new LevelAlarm(id, source, dataReader.GetString(6), dataReader.GetFloat(7), dataReader.GetInt32(8));
-                            break;
-                        case AlarmType.Dev:
-                            cond = new DevAlarm(id, (ConditionType)dataReader.GetByte(4), source, dataReader.GetString(6),
-                                dataReader.GetFloat(5), dataReader.GetFloat(7), dataReader.GetInt32(8));
-                            break;
-                        case AlarmType.ROC:
-                            cond = new ROCAlarm(id, source, dataReader.GetString(6), dataReader.GetFloat(7), dataReader.GetInt32(8));
-                            break;
-                        case AlarmType.Quality:
-                            cond = new QualitiesAlarm(id, source, dataReader.GetString(6));
-                            break;
-                        case AlarmType.WordDsc:
-                            cond = new WordDigitAlarm(id, source, dataReader.GetString(6), dataReader.GetInt32(8));
-                            break;
-                        default:
-                            cond = new DigitAlarm(id, source, dataReader.GetString(6), dataReader.GetInt32(8));
-                            break;
-                    }
-                    cond.AddSubCondition(new SubCondition((SubAlarmType)dataReader.GetInt32(9), dataReader.GetFloat(10),
-                               (Severity)dataReader.GetByte(11), dataReader.GetString(12), dataReader.GetBoolean(13)));
+                var sss = DataHelper.InstanceConnection.Query<Meta_Condition>(sql5).ToList();
+                _conditions = DataHelper.InstanceConnection.Query<Meta_Condition>(sql5)
+                              .Select(p =>
+                              {
+                                  AlarmType type = (AlarmType)p.AlarmType;
+                                  ICondition cond;
+                                  switch (type)
+                                  {
+                                      case AlarmType.Complex:
+                                          cond = new ComplexCondition(p.TypeID, p.Source, p.Comment, (float)p.DeadBand, p.Delay);
+                                          break;
+                                      case AlarmType.Level:
+                                          cond = new LevelAlarm(p.TypeID, p.Source, p.Comment, (float)p.DeadBand, p.Delay);
+                                          break;
+                                      case AlarmType.Dev:
+                                          cond = new DevAlarm(p.TypeID, (ConditionType)p.ConditionType, p.Source, p.Comment,
+                                              (float)p.Para, (float)p.DeadBand, p.Delay);
+                                          break;
+                                      case AlarmType.ROC:
+                                          cond = new ROCAlarm(p.TypeID, p.Source, p.Comment, (float)p.DeadBand, p.Delay);
+                                          break;
+                                      case AlarmType.Quality:
+                                          cond = new QualitiesAlarm(p.TypeID, p.Source, p.Comment);
+                                          break;
+                                      case AlarmType.WordDsc:
+                                          cond = new WordDigitAlarm(p.TypeID, p.Source, p.Comment, p.Delay);
+                                          break;
+                                      default:
+                                          cond = new DigitAlarm(p.TypeID, p.Source, p.Comment, p.Delay);
+                                          break;
+                                  }
+                                  cond.IsEnabled = p.IsEnabled;
+                                  if (cond is SimpleCondition)
+                                  {
+                                      var simpcond = cond as SimpleCondition;
+                                      simpcond.Tag = this[p.Source];
+                                  }
+                                  else if (cond is ComplexCondition)
+                                  {
+                                      var complexcond = cond as ComplexCondition;
+                                      var action = complexcond.SetFunction(reval.Eval(p.Source));
+                                      if (action != null)
+                                      {
+                                          ValueChangedEventHandler handle = (s1, e1) => { action(); };
+                                          foreach (ITag tag in reval.TagList)
+                                          {
+                                              tag.ValueChanged += handle;// tag.Refresh();
+                                          }
+                                      }
+                                  }
 
-                    cond.IsEnabled = dataReader.GetBoolean(3);
-                    var simpcond = cond as SimpleCondition;
-                    if (simpcond != null)
-                    {
-                        simpcond.Tag = this[source];
-                    }
-                    else
-                    {
-                        var complexcond = cond as ComplexCondition;
-                        if (complexcond != null)
-                        {
-                            var action = complexcond.SetFunction(reval.Eval(source));
-                            if (action != null)
-                            {
-                                ValueChangedEventHandler handle = (s1, e1) => { action(); };
-                                foreach (ITag tag in reval.TagList)
-                                {
-                                    tag.ValueChanged += handle;// tag.Refresh();
-                                }
-                            }
-                        }
-                    }
-                    cond.AlarmActive += new AlarmEventHandler(cond_SendAlarm);
-                    //_conditions.Add(cond);// UpdateCondition(cond);
-                    _conditions.Add(cond);
-                }
-                dataReader.NextResult();
-                while (dataReader.Read())
+                                  cond.AlarmActive += new AlarmEventHandler(cond_SendAlarm);
+                                  return cond;
+                              }).ToList();
+                var sql6 = @"SELECT	* from  Meta_SubCondition;";
+                DataHelper.InstanceConnection.Query<Meta_SubCondition>(sql6).ToList().ForEach(p =>
                 {
-                    _scales.Add(new Scaling(dataReader.GetInt16(0), (ScaleType)dataReader.GetByte(1),
-                        dataReader.GetFloat(2), dataReader.GetFloat(3), dataReader.GetFloat(4), dataReader.GetFloat(5)));
+                    var cur = _conditions.First(q => q.ID == p.ConditionID);
+                    if (cur != null)
+                    {
+                        var sub = new SubCondition((SubAlarmType)p.SubAlarmType, (float)p.Threshold, (Severity)p.Severity, p.Message, p.IsEnable);
+                        cur.AddSubCondition(sub);
+                    }
+                });
+
+                var sql7 = @"SELECT	* from  Meta_Scale;";
+                _scales = DataHelper.InstanceConnection.Query<Meta_Scale>(sql7).Select(p =>
+                {
+                    var scale = new Scaling((short)p.ScaleID, (ScaleType)p.ScaleType, (float)p.EUHi, (float)p.EULo, (float)p.RawHi, (float)p.RawLo);
+                    return scale;
+                }).ToList();
+                if (_archiveTimes.Count > 0)
+                {
+                    _hasHda = true;
+                    _hda.Capacity = MAXHDACAP;
                 }
+                reval.Clear();
+                _scales.Sort();
+                _compare = new CompareCondBySource();
+                _conditions.Sort(_compare);
             }
-            if (_archiveTimes.Count > 0)
+            catch (Exception ex)
             {
-                _hasHda = true;
-                _hda.Capacity = MAXHDACAP;
+                AddErrorLog(ex);
             }
-            reval.Clear();
-            _scales.Sort();
-            _compare = new CompareCondBySource();
-            _conditions.Sort(_compare);
-        }
 
+        }
         void InitHost()
         {
             /*对关闭状态的判断，最好用心跳检测；冗余切换，可广播冗余命令，包含新主机名、数据库连接、IP地址等。
@@ -1163,7 +1154,7 @@ namespace BatchCoreService
             lock (_hdaRoot)
             {
                 if (_hda.Count == 0) return;
-                if (DataHelper.Instance.BulkCopy(new HDASqlReader(_hda, this), "Log_HData",
+                if (DataHelper.BulkCopy(new HDASqlReader(_hda, this), "Log_HData",
                       string.Format("DELETE FROM Log_HData WHERE [TIMESTAMP]>'{0}'", _hda[0].TimeStamp.ToString())))
                 {
                     _hda.Clear();
@@ -1176,7 +1167,7 @@ namespace BatchCoreService
         {
             var tempdata = _hda.ToArray();
             if (tempdata.Length == 0) return true;
-            return DataHelper.Instance.BulkCopy(new HDASqlReader(GetData(tempdata, startTime, endTime), this), "Log_HData",
+            return DataHelper.BulkCopy(new HDASqlReader(GetData(tempdata, startTime, endTime), this), "Log_HData",
                      string.Format("DELETE FROM Log_HData WHERE [TIMESTAMP] BETWEEN '{0}' AND '{1}'", startTime, endTime));
         }
 
@@ -1191,7 +1182,7 @@ namespace BatchCoreService
                     //Reverse(data);
                     DateTime start = _hda[0].TimeStamp;
                     //_array.CopyTo(data, 0);
-                    if (DataHelper.Instance.BulkCopy(new HDASqlReader(_hda, this), "Log_HData",
+                    if (DataHelper.BulkCopy(new HDASqlReader(_hda, this), "Log_HData",
                     string.Format("DELETE FROM Log_HData WHERE [TIMESTAMP]>'{0}'", start.ToString())))
                         _hdastart = DateTime.Now;
                     else ThreadPool.UnsafeQueueUserWorkItem(new WaitCallback(this.SaveCachedData), _hda.ToArray());
@@ -1211,7 +1202,7 @@ namespace BatchCoreService
             while (true)
             {
                 if (count >= 5) return;
-                if (DataHelper.Instance.BulkCopy(new HDASqlReader(tempData, this), "Log_HData",
+                if (DataHelper.BulkCopy(new HDASqlReader(tempData, this), "Log_HData",
                    string.Format("DELETE FROM Log_HData WHERE [TIMESTAMP] BETWEEN '{0}' AND '{1}'",
                     startTime, endTime)))
                 {
@@ -1242,10 +1233,9 @@ namespace BatchCoreService
         void OnValueChanged(object sender, ValueChangedEventArgs e)
         {
             var tag = sender as ITag;
-            DataHelper.Instance.ExecuteStoredProcedure("AddEventLog",
-                DataHelper.CreateParam("@StartTime", SqlDbType.DateTime, tag.TimeStamp),
-                DataHelper.CreateParam("@Source", SqlDbType.NVarChar, tag.ID.ToString(), 50),
-                DataHelper.CreateParam("@Comment", SqlDbType.NVarChar, tag.ToString(), 50));
+            string sql = @"INSERT INTO LOG_EVENT(EVENTTYPE,SEVERITY,ACTIVETIME,SOURCE,COMMENT) VALUES(2,0,{0},{1},{2})";
+            string fsql = string.Format(sql, tag.TimeStamp, tag.ID.ToString(), tag.ToString());
+            var r=DataHelper.InstanceConnection.Execute(fsql);
         }
 
         public HistoryData[] BatchRead(DataSource source, bool sync, params ITag[] itemArray)
@@ -1717,7 +1707,7 @@ namespace BatchCoreService
         private bool SaveAlarm()
         {
             if (_alarmList.Count == 0) return true;
-            if (DataHelper.Instance.BulkCopy(new AlarmDataReader(_alarmList), "Log_Alarm", null, SqlBulkCopyOptions.KeepIdentity))
+            if (DataHelper.BulkCopy(new AlarmDataReader(_alarmList), "Log_Alarm", null, SqlBulkCopyOptions.KeepIdentity))
             {
                 _alarmList.Clear();
                 _alarmstart = DateTime.Now;

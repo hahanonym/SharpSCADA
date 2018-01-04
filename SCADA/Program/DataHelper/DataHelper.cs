@@ -3,12 +3,16 @@ using System;
 using System.Data;
 using System.Data.Common;
 using System.Data.SqlClient;
+using System.Data.SQLite;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
-
+using Dapper;
+using System.Collections.Generic;
+using System.Collections;
+using System.Linq;
 namespace DatabaseLib
 {
     public static class DataHelper
@@ -26,13 +30,14 @@ namespace DatabaseLib
 
         static EventLog Log;
         #region GetInstance
-        private static IDataFactory _ins;
+        private static IDbConnection _insconn;
 
-        public static IDataFactory Instance
+
+        public static IDbConnection InstanceConnection
         {
             get
             {
-                return _ins;
+                return _insconn;
             }
         }
 
@@ -91,13 +96,27 @@ namespace DatabaseLib
                 switch (m_type.ToUpper())
                 {
                     case "MSSQL":
-                        _ins = new MssqlFactory();
+                        {
+                            _insconn = new SqlConnection(DataHelper.ConnectString);
+                            
+                        }
                         break;
                     case "MYSQL":
-                        _ins = new MysqlFactory();
+                        {
+                            _insconn = new MySqlConnection(DataHelper.ConnectString);
+                            
+                        }
+                        break;
+                    case "SQLITE":
+                        {
+                            _insconn = new SQLiteConnection(DataHelper.ConnectString);                            
+                        }
                         break;
                     default:
-                        _ins = new MssqlFactory();
+                        {
+                            _insconn = new SqlConnection(DataHelper.ConnectString);
+                           
+                        }
                         break;
                 }
             }
@@ -107,10 +126,7 @@ namespace DatabaseLib
             }
         }
 
-        public static DbParameter CreateParam(string paramName, SqlDbType dbType, object objValue, int size = 0, ParameterDirection direction = ParameterDirection.Input)
-        {
-            return _ins.CreateParam(paramName, dbType, objValue, size, direction);
-        }
+
 
         public static string DataTableToCsv(DataTable table)
         {
@@ -222,6 +238,106 @@ namespace DatabaseLib
                 return mq.GetValue(index);
             }
             return "";
+        }
+
+        public static bool BulkCopy(IDataReader reader, string tableName, string command = null, SqlBulkCopyOptions options = SqlBulkCopyOptions.Default)
+        {
+            if(m_host.ToUpper()== "MSSQL")
+            {
+               return BulkCopyByMSSql(reader, tableName, command, options);
+            }
+            else if (m_host.ToUpper() == "MYSQL")
+            {
+                return BulkCopyByMySql(reader, tableName, command, options);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        private static bool BulkCopyByMSSql(IDataReader reader, string tableName, string command = null, SqlBulkCopyOptions options = SqlBulkCopyOptions.Default)
+        {
+            using (SqlConnection m_Conn = new SqlConnection(DataHelper.ConnectString))
+            {
+                SqlTransaction sqlT = null;
+                try
+                {
+                    if (m_Conn.State == ConnectionState.Closed)
+                        m_Conn.Open();
+                    sqlT = m_Conn.BeginTransaction();
+                    if (!string.IsNullOrEmpty(command))
+                    {
+                        SqlCommand cmd = new SqlCommand(command, m_Conn);
+                        cmd.Transaction = sqlT;
+                        cmd.ExecuteNonQuery();
+                    }
+                    SqlBulkCopy copy = new SqlBulkCopy(m_Conn, options, sqlT);
+                    copy.DestinationTableName = tableName;
+                    copy.BulkCopyTimeout = 100000;
+                    //copy.BatchSize = _capacity;
+                    copy.WriteToServer(reader);//如果写入失败，考虑不能无限增加线程数
+                                               //Clear();
+                    sqlT.Commit();
+                    m_Conn.Close();
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    if (sqlT != null)
+                        sqlT.Rollback();
+                    m_Conn.Close();
+                    AddErrorLog(e);
+                    return false;
+                }
+            }
+        }
+        private static bool BulkCopyByMySql(IDataReader reader, string tableName, string command = null, SqlBulkCopyOptions options = SqlBulkCopyOptions.Default)
+        {
+            using (MySqlConnection m_Conn = new MySqlConnection(DataHelper.ConnectString))
+            {
+                MySqlTransaction sqlT = null;
+                try
+                {
+                    if (m_Conn.State == ConnectionState.Closed)
+                        m_Conn.Open();
+                    sqlT = m_Conn.BeginTransaction();
+                    if (!string.IsNullOrEmpty(command))
+                    {
+                        MySqlCommand cmd = new MySqlCommand(command, m_Conn);
+                        cmd.Transaction = sqlT;
+                        cmd.ExecuteNonQuery();
+                    }
+                    string tmpPath = Path.GetTempFileName();
+                    string csv = DataHelper.ReaderToCsv(reader);
+                    File.WriteAllText(tmpPath, csv);
+                    MySqlBulkLoader copy = new MySqlBulkLoader(m_Conn)
+                    {
+                        FieldTerminator = ",",
+                        FieldQuotationCharacter = '"',
+                        EscapeCharacter = '"',
+                        LineTerminator = "\r\n",
+                        FileName = tmpPath,
+                        NumberOfLinesToSkip = 0,
+                        TableName = tableName,
+                    };
+                    //copy.BatchSize = _capacity;
+                    copy.Load();//如果写入失败，考虑不能无限增加线程数
+                                //Clear();
+                    sqlT.Commit();
+                    m_Conn.Close();
+                    File.Delete(tmpPath);
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    if (sqlT != null)
+                        sqlT.Rollback();
+                    m_Conn.Close();
+                    DataHelper.AddErrorLog(e);
+                    return false;
+                }
+            }
         }
     }
 
